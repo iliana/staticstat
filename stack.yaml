@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  A CloudFront distribution that returns a 1x1 image, writing access logs to an
+  S3 bucket. These access logs are processed by a Lambda function to collect
+  hit counts into a DynamoDB table. This stack must be deployed in us-east-1.
+Parameters:
+  DomainName:
+    Type: String
+    Default: ""
+    Description: >
+      Domain name to use for the CloudFront distribution. Leave empty to use
+      the default *.cloudfront.net domain name.
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: >
+      ARN for the AWS Certificate Manager certificate issued. Leave empty to
+      use the default *.cloudfront.net certificate.
+  PriceClass:
+    Type: String
+    Description: >
+      The CloudFront distribution price class. CloudFront price classes are
+      detailed at https://aws.amazon.com/cloudfront/pricing/
+    Default: 'PriceClass_All'
+    AllowedValues:
+      - 'PriceClass_100'
+      - 'PriceClass_200'
+      - 'PriceClass_All'
+Conditions:
+  UsingDomainName: !Not [!Equals [!Ref DomainName, ""]]
+  UsingCertificateArn: !Not [!Equals [!Ref CertificateArn, ""]]
+Resources:
+  LogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases: !If [UsingDomainName, [!Ref DomainName], !Ref "AWS::NoValue"]
+        DefaultCacheBehavior:
+          AllowedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: false
+          LambdaFunctionAssociations:
+            - EventType: origin-request
+              LambdaFunctionARN: !Ref OriginRequestVersion
+          TargetOriginId: s3-empty
+          ViewerProtocolPolicy: redirect-to-https
+        DefaultRootObject: index.html
+        Enabled: true
+        IPV6Enabled: true
+        Logging:
+          Bucket: !Join ["", [!Ref LogBucket, ".s3.amazonaws.com"]]
+          IncludeCookies: false
+          Prefix: logs/
+        HttpVersion: http2
+        Origins:
+          - DomainName: !Join ["", [!Ref LogBucket, ".s3.amazonaws.com"]]
+            Id: s3-empty
+            OriginPath: /invalid-prefix
+            S3OriginConfig:
+              OriginAccessIdentity: !Join ["", ["origin-access-identity/cloudfront/", !Ref CloudFrontOriginAccessIdentity]]
+        PriceClass: !Ref PriceClass
+        ViewerCertificate: !If [UsingCertificateArn, {AcmCertificateArn: !Ref CertificateArn, SslSupportMethod: sni-only}, {CloudFrontDefaultCertificate: true}]
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: oh god how did this get here i am not good with computer
+  OriginRequestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            const uri = event.Records[0].cf.request.uri;
+            if (uri == "/pixel.gif") {
+              return {
+                status: '200',
+                headers: {
+                  'access-control-allow-origin': [{key: 'access-control-allow-origin', value: '*'}],
+                  'cache-control': [{key: 'cache-control', value: 'no-cache, no-store, must-revalidate'}],
+                  'content-type': [{key: 'content-type', value: 'image/gif'}],
+                  'expires': [{key: 'expires', value: 'Mon, 01 Jan 1990 00:00:00 GMT'}],
+                  'pragma': [{key: 'pragma', value: 'no-cache'}],
+                  'x-content-type-options': [{key: 'x-content-type-options', value: 'nosniff'}],
+                },
+                body: 'R0lGODlhAQABAID/AP///wAAACwAAAAAAQABAAACAkQBADs=',
+                bodyEncoding: 'base64',
+              };
+            } else {
+              return {status: '404'};
+            }
+          };
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt OriginRequestExecutionRole.Arn
+      Runtime: nodejs8.10
+      Timeout: 1
+  OriginRequestVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref OriginRequestFunction
+  OriginRequestExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - edgelambda.amazonaws.com
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
