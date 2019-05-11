@@ -2,7 +2,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   A CloudFront distribution that returns a 1x1 image, writing access logs to an
   S3 bucket. These access logs are processed by a Lambda function to collect
-  hit counts into a DynamoDB table. This stack must be deployed in us-east-1.
+  hit counts into an Athena table. This stack must be deployed in us-east-1 due
+  to CloudFront.
 Parameters:
   DomainName:
     Type: String
@@ -26,6 +27,14 @@ Parameters:
       - 'PriceClass_100'
       - 'PriceClass_200'
       - 'PriceClass_All'
+  PartitionLogFunctionS3Bucket:
+    Type: String
+    Description: >
+      S3 bucket containing the compiled log partitioning function.
+  PartitionLogFunctionS3Key:
+    Type: String
+    Description: >
+      S3 key containing the compiled log partitioning function.
 Conditions:
   UsingDomainName: !Not [!Equals [!Ref DomainName, ""]]
   UsingCertificateArn: !Not [!Equals [!Ref CertificateArn, ""]]
@@ -33,6 +42,17 @@ Resources:
   LogBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
+    Properties:
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:Put
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: logs/
+            Function: !GetAtt PartitionLogFunction.Arn
+
   CloudFrontDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -68,6 +88,7 @@ Resources:
     Properties:
       CloudFrontOriginAccessIdentityConfig:
         Comment: oh god how did this get here i am not good with computer
+
   OriginRequestFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -115,5 +136,51 @@ Resources:
                 - lambda.amazonaws.com
             Action:
               - sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  PartitionLogFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref PartitionLogFunctionS3Bucket
+        S3Key: !Ref PartitionLogFunctionS3Key
+      Handler: doesnt.matter
+      MemorySize: 128
+      Role: !GetAtt PartitionLogExecutionRole.Arn
+      Runtime: provided
+      Timeout: 10
+  PartitionLogExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: whatever
+          PolicyDocument:
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:DeleteObject"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+  PartitionLogPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt PartitionLogFunction.Arn
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt LogBucket.Arn
