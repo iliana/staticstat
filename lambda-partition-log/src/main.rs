@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT-0
+
 #![warn(clippy::pedantic)]
 #![allow(clippy::default_trait_access)]
 #![allow(clippy::use_self)]
